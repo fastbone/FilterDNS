@@ -23,7 +23,8 @@ public class XferHandler
     private readonly IpWhitelist? _healthCheckWhitelist;
     private readonly Func<string, ZoneConfig, CancellationToken, Task>? _onNotifyReceived;
     private readonly Func<string, ZoneHistory?>? _getHistory;
-    private readonly Func<string, ZoneConfig, List<FilteredRecord>, uint, CancellationToken, Task>? _onZoneUpdatedDuringTransfer;
+    // Callback signature: zoneName, zoneConfig, newRecords, newSerial, oldRecords, oldSerial, cancellationToken
+    private readonly Func<string, ZoneConfig, List<FilteredRecord>, uint, List<FilteredRecord>?, uint, CancellationToken, Task>? _onZoneUpdatedDuringTransfer;
     private readonly string _ixfrResponseMode; // "Incremental" or "FullZone"
     private readonly SecurityConfig? _securityConfig;
     
@@ -42,7 +43,7 @@ public class XferHandler
         IpWhitelist? healthCheckWhitelist = null,
         Func<string, ZoneConfig, CancellationToken, Task>? onNotifyReceived = null,
         Func<string, ZoneHistory?>? getHistory = null,
-        Func<string, ZoneConfig, List<FilteredRecord>, uint, CancellationToken, Task>? onZoneUpdatedDuringTransfer = null,
+        Func<string, ZoneConfig, List<FilteredRecord>, uint, List<FilteredRecord>?, uint, CancellationToken, Task>? onZoneUpdatedDuringTransfer = null,
         string ixfrResponseMode = "Incremental",
         SecurityConfig? securityConfig = null)
     {
@@ -1394,6 +1395,7 @@ public class XferHandler
     /// Updates the cache and notifies about zone updates during transfer handling.
     /// This ensures zone history is updated and other slaves are notified when the cache
     /// is updated during AXFR/IXFR handling.
+    /// CRITICAL: Captures the old zone BEFORE updating to ensure history continuity for IXFR.
     /// </summary>
     private async Task UpdateCacheAndNotifyAsync(
         string zoneName,
@@ -1401,22 +1403,37 @@ public class XferHandler
         List<FilteredRecord> records,
         CancellationToken cancellationToken)
     {
-        // Extract serial from SOA
-        var serial = records
+        // Extract serial from SOA of new records
+        var newSerial = records
             .FirstOrDefault(r => r.RecordType == ResourceRecordType.SOA)
             ?.SoaData?.Serial ?? 0;
+        
+        // CRITICAL: Get the old cached zone BEFORE updating
+        // This is needed to save the old version to history for IXFR support
+        var oldCachedZone = _cache.GetZone(zoneName);
+        var oldSerial = oldCachedZone?.Serial ?? 0;
+        var oldRecords = oldCachedZone?.Records;
         
         // Update cache
         _cache.UpdateZone(zoneName, records);
         
         // Notify about the update (updates history and sends NOTIFY to other slaves)
-        if (_onZoneUpdatedDuringTransfer != null && serial > 0)
+        if (_onZoneUpdatedDuringTransfer != null && newSerial > 0)
         {
             try
             {
-                await _onZoneUpdatedDuringTransfer(zoneName, zoneConfig, records, serial, cancellationToken);
-                _logger.LogDebug("Zone {Zone} updated during transfer handling (serial: {Serial}), history updated and slaves notified", 
-                    zoneName, serial);
+                // Pass old zone info so the callback can save it to history first
+                await _onZoneUpdatedDuringTransfer(
+                    zoneName, 
+                    zoneConfig, 
+                    records, 
+                    newSerial, 
+                    oldRecords,
+                    oldSerial,
+                    cancellationToken);
+                _logger.LogDebug(
+                    "Zone {Zone} updated during transfer handling (serial: {OldSerial} -> {NewSerial}), history updated and slaves notified", 
+                    zoneName, oldSerial, newSerial);
             }
             catch (Exception ex)
             {

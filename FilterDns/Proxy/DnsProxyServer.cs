@@ -326,25 +326,31 @@ public class DnsProxyServer : BackgroundService
     /// Callback for when XferHandler updates the cache during zone transfer handling.
     /// This ensures zone history is updated and other slaves are notified when the cache
     /// is updated outside of the normal polling/NOTIFY flow.
+    /// CRITICAL: Receives old zone info to maintain history continuity for IXFR.
     /// </summary>
     private async Task HandleZoneUpdatedDuringTransferAsync(
         string zoneName,
         ZoneConfig zoneConfig,
-        List<FilteredRecord> records,
+        List<FilteredRecord> newRecords,
         uint newSerial,
+        List<FilteredRecord>? oldRecords,
+        uint oldSerial,
         CancellationToken cancellationToken)
     {
-        _logger.LogDebug("Zone {Zone} updated during transfer handling to serial {Serial}, updating history and notifying slaves", 
-            zoneName, newSerial);
+        _logger.LogDebug("Zone {Zone} updated during transfer handling (serial: {OldSerial} -> {NewSerial}), updating history and notifying slaves", 
+            zoneName, oldSerial, newSerial);
 
-        // Save current cached version to history BEFORE we consider it replaced
-        // Note: The cache was already updated by XferHandler, so we get the "previous" version
-        // from history if available, or skip if this is the first version
-        // Actually, the cache is already updated at this point, so we need to handle this differently
-        // We'll just update history with the new version and send NOTIFY
+        // CRITICAL: Save the OLD version to history FIRST (before adding new version)
+        // This ensures IXFR can calculate diffs from the old serial to the new serial
+        if (oldRecords != null && oldSerial > 0 && oldSerial != newSerial)
+        {
+            await SaveCurrentVersionToHistoryAsync(zoneName, zoneConfig, oldRecords, oldSerial);
+            _logger.LogDebug("Zone {Zone}: Saved old version (serial {OldSerial}) to history for IXFR support", 
+                zoneName, oldSerial);
+        }
 
         // Update zone history for IXFR support - add the new version
-        await UpdateZoneHistoryAsync(zoneName, zoneConfig, records, newSerial);
+        await UpdateZoneHistoryAsync(zoneName, zoneConfig, newRecords, newSerial);
 
         // Record this update for rapid update detection
         RecordUpdateTimestamp(zoneName);
@@ -370,8 +376,8 @@ public class DnsProxyServer : BackgroundService
             await SendNotifyToSlavesWithRateLimitAsync(zoneName, zoneConfig, notifySender, logPrefix, cancellationToken);
 
             _logger.LogInformation(
-                "{Prefix}: Zone {Zone} serial {Serial} - history updated and slaves notified",
-                logPrefix, zoneName, newSerial);
+                "{Prefix}: Zone {Zone} serial {OldSerial} -> {NewSerial} - history updated and slaves notified",
+                logPrefix, zoneName, oldSerial, newSerial);
         }
         else
         {
