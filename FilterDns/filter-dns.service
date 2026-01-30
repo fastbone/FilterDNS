@@ -1,0 +1,36 @@
+[Unit]
+Description=Filter DNS Proxy Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/dnsfilter
+ExecStart=/opt/dnsfilter/FilterDns
+
+# Restart configuration
+# - Restart on any exit (including self-restart with exit code 100)
+# - Wait 10 seconds between restarts to allow transient issues to clear
+# - Limit restarts: max 5 restarts in 5 minutes (StartLimitBurst/StartLimitIntervalSec)
+Restart=always
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=filter-dns
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits (optional, adjust as needed)
+# LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+
+
+
