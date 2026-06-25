@@ -23,7 +23,8 @@ public class XferHandler
     private readonly IpWhitelist? _healthCheckWhitelist;
     private readonly Func<string, ZoneConfig, CancellationToken, Task>? _onNotifyReceived;
     private readonly Func<string, ZoneHistory?>? _getHistory;
-    // Callback signature: zoneName, zoneConfig, newRecords, newSerial, oldRecords, oldSerial, cancellationToken
+    // Callback signature: zoneName, zoneConfig, newRecords, newSerial, oldRecords, oldSerial, cancellationToken.
+    // The proxy implementation updates cache/history under its per-zone lock without notifying slaves.
     private readonly Func<string, ZoneConfig, List<FilteredRecord>, uint, List<FilteredRecord>?, uint, CancellationToken, Task>? _onZoneUpdatedDuringTransfer;
     private readonly string _ixfrResponseMode; // "Incremental" or "FullZone"
     private readonly SecurityConfig? _securityConfig;
@@ -820,7 +821,6 @@ public class XferHandler
                 {
                     var upstreamRecords = await upstreamClient.FetchZoneAsync(zoneConfig.Name, cancellationToken);
                     zoneRecords = RecordFilter.ApplyFilters(upstreamRecords, zoneConfig, zoneConfig.Name);
-                    await UpdateCacheAndNotifyAsync(zoneConfig.Name, zoneConfig, zoneRecords, cancellationToken);
                 }
                 catch (Exception ex)
                 {
@@ -1001,7 +1001,7 @@ public class XferHandler
                     var upstreamSerial = await upstreamClient.GetSoaSerialAsync(zoneConfig.Name, cancellationToken);
                     
                     // If upstream has newer serial, fetch fresh data
-                    if (upstreamSerial > cachedZone.Serial)
+                    if (IsSerialNewer(upstreamSerial, cachedZone.Serial))
                     {
                         _logger.LogInformation(
                             "Zone transfer: Cached data for {Zone} is stale (cached: {CachedSerial}, upstream: {UpstreamSerial}), fetching latest from upstream {Upstream}",
@@ -1033,7 +1033,7 @@ public class XferHandler
                         
                         // Update cache with latest data and notify other slaves
                         // This ensures future requests get the latest data and slaves are kept in sync
-                        await UpdateCacheAndNotifyAsync(zoneConfig.Name, zoneConfig, zoneRecords, cancellationToken);
+                        await UpdateCacheAndHistoryAsync(zoneConfig.Name, zoneConfig, zoneRecords, cancellationToken);
                     }
                     else if (upstreamSerial == cachedZone.Serial)
                     {
@@ -1102,7 +1102,7 @@ public class XferHandler
                         zoneConfig.Name, upstreamRecords.Count, zoneRecords.Count);
                     
                     // Update cache with latest data and notify other slaves
-                    await UpdateCacheAndNotifyAsync(zoneConfig.Name, zoneConfig, zoneRecords, cancellationToken);
+                    await UpdateCacheAndHistoryAsync(zoneConfig.Name, zoneConfig, zoneRecords, cancellationToken);
                 }
                 catch (Exception ex)
                 {
@@ -1392,12 +1392,10 @@ public class XferHandler
     }
 
     /// <summary>
-    /// Updates the cache and notifies about zone updates during transfer handling.
-    /// This ensures zone history is updated and other slaves are notified when the cache
-    /// is updated during AXFR/IXFR handling.
-    /// CRITICAL: Captures the old zone BEFORE updating to ensure history continuity for IXFR.
+    /// Updates cache/history through the proxy during transfer handling without notifying slaves.
+    /// The proxy callback owns locking so transfer-triggered refreshes serialize with poll/NOTIFY updates.
     /// </summary>
-    private async Task UpdateCacheAndNotifyAsync(
+    private async Task UpdateCacheAndHistoryAsync(
         string zoneName,
         ZoneConfig zoneConfig,
         List<FilteredRecord> records,
@@ -1408,38 +1406,31 @@ public class XferHandler
             .FirstOrDefault(r => r.RecordType == ResourceRecordType.SOA)
             ?.SoaData?.Serial ?? 0;
         
-        // CRITICAL: Get the old cached zone BEFORE updating
-        // This is needed to save the old version to history for IXFR support
-        var oldCachedZone = _cache.GetZone(zoneName);
-        var oldSerial = oldCachedZone?.Serial ?? 0;
-        var oldRecords = oldCachedZone?.Records;
-        
-        // Update cache
-        _cache.UpdateZone(zoneName, records);
-        
-        // Notify about the update (updates history and sends NOTIFY to other slaves)
         if (_onZoneUpdatedDuringTransfer != null && newSerial > 0)
         {
             try
             {
-                // Pass old zone info so the callback can save it to history first
                 await _onZoneUpdatedDuringTransfer(
                     zoneName, 
                     zoneConfig, 
                     records, 
                     newSerial, 
-                    oldRecords,
-                    oldSerial,
+                    null,
+                    0,
                     cancellationToken);
                 _logger.LogDebug(
-                    "Zone {Zone} updated during transfer handling (serial: {OldSerial} -> {NewSerial}), history updated and slaves notified", 
-                    zoneName, oldSerial, newSerial);
+                    "Zone {Zone} refreshed during transfer handling (serial: {NewSerial}), cache/history update delegated to proxy",
+                    zoneName, newSerial);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to notify about zone update during transfer handling for zone {Zone}", zoneName);
-                // Don't fail the transfer - the cache is already updated
+                _logger.LogWarning(ex, "Failed to update cache/history during transfer handling for zone {Zone}", zoneName);
+                // Don't fail the transfer; the fetched records can still be served to the current requester.
             }
+        }
+        else
+        {
+            _cache.UpdateZone(zoneName, records);
         }
     }
 
@@ -1607,7 +1598,7 @@ public class XferHandler
             // This ensures we include the final diff from last history version to current cache
             // Using snapshot ensures consistency even if cache is updated during IXFR handling
             var diffs = ZoneDiffCalculator.CalculateDiffSequence(
-                history, 
+                historySnapshot,
                 clientSerial.Value, 
                 snapshotSerial.Value,
                 snapshotRecords); // Pass snapshot records for final diff calculation
@@ -1971,7 +1962,7 @@ public class XferHandler
                     var upstreamSerial = await upstreamClient.GetSoaSerialAsync(zoneConfig.Name, cancellationToken);
                     
                     // If upstream has newer serial, fetch fresh data
-                    if (upstreamSerial > cachedZone.Serial)
+                    if (IsSerialNewer(upstreamSerial, cachedZone.Serial))
                     {
                         _logger.LogDebug(
                             "SOA query: Cached data for {Zone} is stale (cached: {CachedSerial}, upstream: {UpstreamSerial}), fetching latest",
@@ -1979,7 +1970,7 @@ public class XferHandler
                         
                         var upstreamRecords = await upstreamClient.FetchZoneAsync(zoneConfig.Name, cancellationToken);
                         zoneRecords = RecordFilter.ApplyFilters(upstreamRecords, zoneConfig, zoneConfig.Name);
-                        await UpdateCacheAndNotifyAsync(zoneConfig.Name, zoneConfig, zoneRecords, cancellationToken);
+                        await UpdateCacheAndHistoryAsync(zoneConfig.Name, zoneConfig, zoneRecords, cancellationToken);
                     }
                     else
                     {
@@ -2010,7 +2001,7 @@ public class XferHandler
                 {
                     var upstreamRecords = await upstreamClient.FetchZoneAsync(zoneConfig.Name, cancellationToken);
                     zoneRecords = RecordFilter.ApplyFilters(upstreamRecords, zoneConfig, zoneConfig.Name);
-                    await UpdateCacheAndNotifyAsync(zoneConfig.Name, zoneConfig, zoneRecords, cancellationToken);
+                    await UpdateCacheAndHistoryAsync(zoneConfig.Name, zoneConfig, zoneRecords, cancellationToken);
                 }
                 catch (Exception ex)
                 {
@@ -2091,6 +2082,23 @@ public class XferHandler
         _connectionCleanupTimer?.Dispose();
         _tcpConnectionSemaphore?.Dispose();
         _udpRequestSemaphore?.Dispose();
+    }
+
+    private static bool IsSerialNewer(uint candidateSerial, uint referenceSerial)
+    {
+        if (candidateSerial == referenceSerial)
+        {
+            return false;
+        }
+
+        const ulong halfSerialSpace = 2147483648UL;
+
+        if (candidateSerial > referenceSerial)
+        {
+            return candidateSerial - (ulong)referenceSerial < halfSerialSpace;
+        }
+
+        return referenceSerial - (ulong)candidateSerial > halfSerialSpace;
     }
 }
 

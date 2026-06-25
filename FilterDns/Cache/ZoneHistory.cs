@@ -71,16 +71,13 @@ public class ZoneHistory
         {
             // Wraparound case: fromSerial is after wraparound
             // Get versions from fromSerial to uint.MaxValue, then from 0 to toSerial
-            // Use explicit range checks to avoid including keys in the middle range
-            foreach (var kvp in _versions.OrderBy(v => v.Key))
+            foreach (var kvp in _versions.Where(v => v.Key >= fromSerial).OrderBy(v => v.Key))
             {
-                // Include keys from fromSerial to max uint32, OR from 0 to toSerial
-                // The second condition ensures we don't include keys between (toSerial+1) and (fromSerial-1)
-                if ((kvp.Key >= fromSerial && kvp.Key <= uint.MaxValue) || 
-                    (kvp.Key >= 0 && kvp.Key <= toSerial))
-                {
-                    result.Add(kvp.Value);
-                }
+                result.Add(kvp.Value);
+            }
+            foreach (var kvp in _versions.Where(v => v.Key <= toSerial).OrderBy(v => v.Key))
+            {
+                result.Add(kvp.Value);
             }
         }
         else

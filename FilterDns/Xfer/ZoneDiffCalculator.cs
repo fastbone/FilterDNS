@@ -101,13 +101,32 @@ public static class ZoneDiffCalculator
         if (history == null)
             throw new ArgumentNullException(nameof(history));
 
-        var diffs = new List<ZoneDiff>();
-
         // Get all versions between fromSerial and toSerial
         var versions = history.GetVersionsBetween(fromSerial, toSerial);
 
-        // Sort by serial to ensure correct order
-        versions = versions.OrderBy(v => v.Serial).ToList();
+        return CalculateDiffSequence(versions, fromSerial, toSerial, currentZoneRecords);
+    }
+
+    public static List<ZoneDiff> CalculateDiffSequence(
+        Dictionary<uint, ZoneVersion> historySnapshot,
+        uint fromSerial,
+        uint toSerial,
+        List<FilteredRecord>? currentZoneRecords = null)
+    {
+        if (historySnapshot == null)
+            throw new ArgumentNullException(nameof(historySnapshot));
+
+        var versions = GetVersionsBetween(historySnapshot, fromSerial, toSerial);
+        return CalculateDiffSequence(versions, fromSerial, toSerial, currentZoneRecords);
+    }
+
+    private static List<ZoneDiff> CalculateDiffSequence(
+        List<ZoneVersion> versions,
+        uint fromSerial,
+        uint toSerial,
+        List<FilteredRecord>? currentZoneRecords)
+    {
+        var diffs = new List<ZoneDiff>();
 
         // If the fromSerial version doesn't exist, we can't calculate incremental diffs
         // This should be handled by the caller (fallback to AXFR)
@@ -189,6 +208,30 @@ public static class ZoneDiffCalculator
         }
 
         return diffs;
+    }
+
+    private static List<ZoneVersion> GetVersionsBetween(
+        Dictionary<uint, ZoneVersion> historySnapshot,
+        uint fromSerial,
+        uint toSerial)
+    {
+        if (fromSerial > toSerial)
+        {
+            return historySnapshot
+                .Where(kvp => kvp.Key >= fromSerial)
+                .OrderBy(kvp => kvp.Key)
+                .Concat(historySnapshot
+                    .Where(kvp => kvp.Key <= toSerial)
+                    .OrderBy(kvp => kvp.Key))
+                .Select(kvp => kvp.Value)
+                .ToList();
+        }
+
+        return historySnapshot
+            .Where(kvp => kvp.Key >= fromSerial && kvp.Key <= toSerial)
+            .OrderBy(kvp => kvp.Key)
+            .Select(kvp => kvp.Value)
+            .ToList();
     }
 
     /// <summary>

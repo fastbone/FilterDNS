@@ -348,6 +348,12 @@ public static class DnsMessageParser
                         throw new FormatException("Domain name parsing failed: buffer overflow while reading compression pointer");
                     }
 
+                    if (!jumped)
+                    {
+                        jumpOffset = offset + 1;
+                        jumped = true;
+                    }
+
                     var newOffset = ((length & 0x3F) << 8) | data[offset];
                     
                     // Check for compression pointer loops

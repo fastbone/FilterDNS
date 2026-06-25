@@ -19,12 +19,17 @@ Fix first:
 4. Normalize zone names at configuration load so mixed-case zones do not break external DNS paths.
 5. Remove cache-update side effects from health checks and transfer-triggered refreshes.
 
-### Critical Fix Progress
+### Fix Progress
 
 - [x] **SEV-01:** Fixed in this branch. Added persisted raw RDATA round-trip coverage in `FilterDns.Tests/CriticalFindingTests.cs`; invalid legacy history files are now archived to compressed backups and removed from the active history path.
 - [x] **SEV-02:** Fixed in this branch. Added diff coverage for TTL-only changes and loaded same-name A records with distinct RDATA.
 - [x] **SEV-03:** Fixed in this branch. Added CIDR coverage for non-byte-aligned IPv4 whitelist ranges and custom IPv6 private ranges.
-- [ ] **SEV-04+ follow-ups:** Not started in this pass.
+- [x] **SEV-04:** Fixed in this branch. Added compressed IXFR authority SOA parser coverage.
+- [x] **SEV-05:** Fixed in this branch. Added mixed-case configured-zone normalization coverage.
+- [x] **SEV-06:** Fixed in this branch. Health-check cache misses now fetch/filter for the response without cache/history/NOTIFY propagation.
+- [x] **SEV-07:** Fixed in this branch. Transfer-triggered refreshes update cache/history through the proxy's per-zone lock and skip slave NOTIFY.
+- [x] **SEV-08:** Fixed in this branch. Added snapshot-based IXFR diff coverage.
+- [x] **SEV-09:** Fixed in this branch. Minimum record count is checked before poll/NOTIFY/transfer-refresh cache/history updates.
 
 ## Findings
 
@@ -67,6 +72,7 @@ Fix first:
 ### [SEV-04] Hardened DNS compression parsing leaves the offset at the pointed-to name
 
 - **Severity:** High
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Dns/DnsMessageParser.cs:334-368`, `FilterDns/Dns/DnsMessageParser.cs:414-417`
 - **What's wrong:** In the hardening branch of `ReadDomainName`, compression pointers are followed, but `jumped` and `jumpOffset` are never set. After resolving a compressed name, the caller resumes reading at the target name terminator instead of after the original two-byte pointer.
@@ -78,6 +84,7 @@ Fix first:
 ### [SEV-05] Mixed-case configured zone names break NOTIFY, transfers, and health checks
 
 - **Severity:** High
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Proxy/DnsProxyServer.cs:107-115`, `FilterDns/Xfer/XferHandler.cs:665-676`, `FilterDns/Xfer/XferHandler.cs:771-783`, `FilterDns/Xfer/XferHandler.cs:942-965`
 - **What's wrong:** `_zones`, `_notifySenders`, and `_zoneUpdateSemaphores` are keyed with `zoneConfig.Name` exactly as configured. External request paths lower-case query names before lookup. A configured `Example.com` key is not found for `example.com`.
@@ -89,6 +96,7 @@ Fix first:
 ### [SEV-06] Health-check cache misses update history and notify slaves
 
 - **Severity:** High
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Xfer/XferHandler.cs:803-824`, `FilterDns/Xfer/XferHandler.cs:1400-1443`, `FilterDns/Proxy/DnsProxyServer.cs:340-380`
 - **What's wrong:** A health-check query from an allowed IP fetches upstream on cache miss, then calls `UpdateCacheAndNotifyAsync`. That callback updates history and sends NOTIFY to all slaves, even though the trigger was only a read-style health probe.
@@ -100,6 +108,7 @@ Fix first:
 ### [SEV-07] Transfer-triggered refreshes race poll/NOTIFY updates and notify slaves mid-transfer
 
 - **Severity:** High
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Proxy/DnsProxyServer.cs:516-531`, `FilterDns/Xfer/XferHandler.cs:1001-1036`, `FilterDns/Xfer/XferHandler.cs:1071-1105`, `FilterDns/Xfer/XferHandler.cs:1400-1443`
 - **What's wrong:** Poll and upstream-NOTIFY updates are serialized by `_zoneUpdateSemaphores`, but inbound AXFR/IXFR refreshes call `UpdateCacheAndNotifyAsync` without that lock. They also notify all slaves while the requesting slave may still be in the middle of its transfer.
@@ -111,6 +120,7 @@ Fix first:
 ### [SEV-08] IXFR calculates diffs from live history after validating a snapshot
 
 - **Severity:** High
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Xfer/XferHandler.cs:1552-1613`, `FilterDns/Xfer/ZoneDiffCalculator.cs:95-110`
 - **What's wrong:** `HandleIxfrRequestAsync` snapshots history for validation, but then passes the live `ZoneHistory` to `ZoneDiffCalculator.CalculateDiffSequence`. Concurrent adds/prunes/saves can change the versions used for the actual diff after validation succeeds.
@@ -122,6 +132,7 @@ Fix first:
 ### [SEV-09] Minimum record count is enforced after cache, history, and NOTIFY
 
 - **Severity:** High
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Proxy/DnsProxyServer.cs:627-699`, `FilterDns/Xfer/XferHandler.cs:1178-1200`
 - **What's wrong:** Poll/NOTIFY refreshes cache filtered records and notify slaves without applying `MinimumZoneRecordCount`. The minimum is only checked later when a slave requests a transfer.

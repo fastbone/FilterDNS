@@ -82,6 +82,9 @@ public class DnsProxyServer : BackgroundService
         // Build zones and whitelists
         foreach (var zoneConfig in config.Zones)
         {
+            var originalZoneName = zoneConfig.Name;
+            var zoneName = NormalizeZoneName(originalZoneName);
+            zoneConfig.Name = zoneName;
             var whitelistEntries = new List<string>(zoneConfig.XferWhitelist);
             
             // Filter out invalid slaves and automatically add valid slave IPs to whitelist
@@ -100,24 +103,29 @@ public class DnsProxyServer : BackgroundService
                 else
                 {
                     _logger.LogWarning("Skipping invalid slave configuration for zone {Zone}: Ip={Ip}, Port={Port}", 
-                        zoneConfig.Name, slave.Ip, slave.Port);
+                        originalZoneName, slave.Ip, slave.Port);
                 }
             }
 
             var whitelist = new IpWhitelist(whitelistEntries);
-            _zones[zoneConfig.Name] = (zoneConfig, whitelist);
+            _zones[zoneName] = (zoneConfig, whitelist);
 
             // Create notify sender for this zone using only valid slaves
             var notifyLogger = _loggerFactory.CreateLogger<NotifySender>();
-            _notifySenders[zoneConfig.Name] = new NotifySender(validSlaves, notifyLogger);
+            _notifySenders[zoneName] = new NotifySender(validSlaves, notifyLogger);
 
             // Create semaphore for serializing zone updates (1 concurrent update per zone)
-            _zoneUpdateSemaphores[zoneConfig.Name] = new SemaphoreSlim(1, 1);
+            _zoneUpdateSemaphores[zoneName] = new SemaphoreSlim(1, 1);
         }
 
         // Create verification service (shared across all zones)
         var verificationLogger = _loggerFactory.CreateLogger<SlaveVerificationService>();
         _verificationService = new SlaveVerificationService(verificationLogger, emailAlertService, _selfRestartService);
+    }
+
+    private static string NormalizeZoneName(string zoneName)
+    {
+        return zoneName.TrimEnd('.').ToLowerInvariant();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -323,10 +331,9 @@ public class DnsProxyServer : BackgroundService
     }
 
     /// <summary>
-    /// Callback for when XferHandler updates the cache during zone transfer handling.
-    /// This ensures zone history is updated and other slaves are notified when the cache
-    /// is updated outside of the normal polling/NOTIFY flow.
-    /// CRITICAL: Receives old zone info to maintain history continuity for IXFR.
+    /// Callback for when XferHandler refreshes a zone during transfer handling.
+    /// Cache and history updates are serialized with poll/NOTIFY updates, but slave
+    /// NOTIFY is intentionally skipped to avoid triggering competing transfers mid-request.
     /// </summary>
     private async Task HandleZoneUpdatedDuringTransferAsync(
         string zoneName,
@@ -337,51 +344,49 @@ public class DnsProxyServer : BackgroundService
         uint oldSerial,
         CancellationToken cancellationToken)
     {
-        _logger.LogDebug("Zone {Zone} updated during transfer handling (serial: {OldSerial} -> {NewSerial}), updating history and notifying slaves", 
-            zoneName, oldSerial, newSerial);
-
-        // CRITICAL: Save the OLD version to history FIRST (before adding new version)
-        // This ensures IXFR can calculate diffs from the old serial to the new serial
-        if (oldRecords != null && oldSerial > 0 && oldSerial != newSerial)
+        var semaphore = _zoneUpdateSemaphores.GetOrAdd(zoneName, _ => new SemaphoreSlim(1, 1));
+        await semaphore.WaitAsync(cancellationToken);
+        try
         {
-            await SaveCurrentVersionToHistoryAsync(zoneName, zoneConfig, oldRecords, oldSerial);
-            _logger.LogDebug("Zone {Zone}: Saved old version (serial {OldSerial}) to history for IXFR support", 
-                zoneName, oldSerial);
-        }
-
-        // Update zone history for IXFR support - add the new version
-        await UpdateZoneHistoryAsync(zoneName, zoneConfig, newRecords, newSerial);
-
-        // Record this update for rapid update detection
-        RecordUpdateTimestamp(zoneName);
-
-        // Send NOTIFY to all slaves
-        if (_notifySenders.TryGetValue(zoneName, out var notifySender))
-        {
-            // Small delay to ensure zone is fully ready before sending NOTIFY
-            await Task.Delay(Constants.NotifyDelayMs, cancellationToken);
-
-            var logPrefix = "TransferUpdate";
-            
-            // Check if we're in a rapid update period
-            if (IsRapidUpdatePeriod(zoneName))
+            if (IsBelowMinimumRecordCount(zoneName, zoneConfig, newRecords, "TransferUpdate"))
             {
-                var recentCount = GetRecentUpdateCount(zoneName);
-                _logger.LogInformation(
-                    "{Prefix}: Zone {Zone} is in rapid update period ({RecentCount} updates in last {Window}s), using rate-limited NOTIFY",
-                    logPrefix, zoneName, recentCount, Constants.RapidUpdateWindowSeconds);
+                return;
             }
 
-            // Use rate-limited NOTIFY to prevent flooding slaves
-            await SendNotifyToSlavesWithRateLimitAsync(zoneName, zoneConfig, notifySender, logPrefix, cancellationToken);
+            var currentCachedZone = _cache.GetZone(zoneName);
+            if (currentCachedZone != null && IsSerialNewer(currentCachedZone.Serial, newSerial))
+            {
+                _logger.LogInformation(
+                    "TransferUpdate: Zone {Zone} refresh serial {RefreshSerial} is older than cached serial {CachedSerial}; skipping stale cache/history update",
+                    zoneName, newSerial, currentCachedZone.Serial);
+                return;
+            }
+
+            var effectiveOldRecords = oldRecords ?? currentCachedZone?.Records;
+            var effectiveOldSerial = oldSerial > 0 ? oldSerial : currentCachedZone?.Serial ?? 0;
+
+            _logger.LogDebug(
+                "Zone {Zone} refreshed during transfer handling (serial: {OldSerial} -> {NewSerial}), updating cache/history without slave NOTIFY",
+                zoneName, effectiveOldSerial, newSerial);
+
+            if (effectiveOldRecords != null && effectiveOldSerial > 0 && effectiveOldSerial != newSerial)
+            {
+                await SaveCurrentVersionToHistoryAsync(zoneName, zoneConfig, effectiveOldRecords, effectiveOldSerial);
+                _logger.LogDebug("Zone {Zone}: Saved old version (serial {OldSerial}) to history for IXFR support",
+                    zoneName, effectiveOldSerial);
+            }
+
+            _cache.UpdateZone(zoneName, newRecords);
+            await UpdateZoneHistoryAsync(zoneName, zoneConfig, newRecords, newSerial);
+            RecordUpdateTimestamp(zoneName);
 
             _logger.LogInformation(
-                "{Prefix}: Zone {Zone} serial {OldSerial} -> {NewSerial} - history updated and slaves notified",
-                logPrefix, zoneName, oldSerial, newSerial);
+                "TransferUpdate: Zone {Zone} serial {OldSerial} -> {NewSerial} - cache/history updated without slave NOTIFY",
+                zoneName, effectiveOldSerial, newSerial);
         }
-        else
+        finally
         {
-            _logger.LogDebug("Zone {Zone} has no configured slaves, skipping NOTIFY", zoneName);
+            semaphore.Release();
         }
     }
 
@@ -634,6 +639,11 @@ public class DnsProxyServer : BackgroundService
                     logPrefix, zoneName);
                 _selfRestartService.ReportZoneFailure(zoneName, "Zone filtered to empty records");
                 return; // Don't update cache with empty data
+            }
+
+            if (IsBelowMinimumRecordCount(zoneName, zoneConfig, filteredRecords, logPrefix))
+            {
+                return;
             }
             
             // Calculate statistics for filtered records
@@ -1182,6 +1192,44 @@ public class DnsProxyServer : BackgroundService
         {
             _logger.LogError(ex, "Failed to update zone history for {ZoneName}", zoneName);
         }
+    }
+
+    private bool IsBelowMinimumRecordCount(
+        string zoneName,
+        ZoneConfig zoneConfig,
+        List<FilteredRecord> records,
+        string logPrefix)
+    {
+        var minimumRecordCount = zoneConfig.MinimumZoneRecordCount ?? 3;
+        if (minimumRecordCount <= 0 || records.Count >= minimumRecordCount)
+        {
+            return false;
+        }
+
+        _logger.LogError(
+            "{Prefix}: Zone {Zone} has only {RecordCount} filtered records (minimum: {MinimumCount}); keeping existing cache and skipping history/NOTIFY",
+            logPrefix, zoneName, records.Count, minimumRecordCount);
+        _selfRestartService.ReportZoneFailure(
+            zoneName,
+            $"Filtered record count {records.Count} below minimum {minimumRecordCount}");
+        return true;
+    }
+
+    private static bool IsSerialNewer(uint candidateSerial, uint referenceSerial)
+    {
+        if (candidateSerial == referenceSerial)
+        {
+            return false;
+        }
+
+        const ulong halfSerialSpace = 2147483648UL;
+
+        if (candidateSerial > referenceSerial)
+        {
+            return candidateSerial - (ulong)referenceSerial < halfSerialSpace;
+        }
+
+        return referenceSerial - (ulong)candidateSerial > halfSerialSpace;
     }
 
     /// <summary>
