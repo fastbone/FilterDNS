@@ -213,11 +213,45 @@ public class ZoneHistoryStorage
         // Check for symlinks if protection is enabled
         if (_securityConfig?.EnableSymlinkProtection ?? true)
         {
-            if (IsSymlink(filePath))
+            if (ContainsSymlinkInPath(absoluteFilePath, absoluteBaseDir))
             {
-                throw new System.Security.SecurityException($"Path '{filePath}' is a symlink, which is not allowed");
+                throw new System.Security.SecurityException($"Path '{filePath}' contains a symlink, which is not allowed");
             }
         }
+    }
+
+    private bool ContainsSymlinkInPath(string absoluteFilePath, string absoluteBaseDir)
+    {
+        var baseFullPath = Path.GetFullPath(absoluteBaseDir).TrimEnd(Path.DirectorySeparatorChar);
+        var current = Path.GetFullPath(absoluteFilePath);
+
+        var pathsToCheck = new Stack<string>();
+        while (!string.IsNullOrEmpty(current) && current.Length >= baseFullPath.Length)
+        {
+            pathsToCheck.Push(current);
+            if (string.Equals(current.TrimEnd(Path.DirectorySeparatorChar), baseFullPath, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            var parent = Path.GetDirectoryName(current);
+            if (string.Equals(parent, current, StringComparison.Ordinal))
+            {
+                break;
+            }
+            current = parent ?? string.Empty;
+        }
+
+        while (pathsToCheck.Count > 0)
+        {
+            var path = pathsToCheck.Pop();
+            if ((File.Exists(path) || Directory.Exists(path)) && IsSymlink(path))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

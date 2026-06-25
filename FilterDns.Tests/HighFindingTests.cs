@@ -124,6 +124,19 @@ public class HighFindingTests
     }
 
     [Fact]
+    public void DnsProxyServer_OnlyFetchesWhenUpstreamSerialIsNewer()
+    {
+        var method = typeof(DnsProxyServer).GetMethod(
+            "ShouldFetchFromUpstream",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        Assert.False((bool)method.Invoke(null, [3u, true, 2u])!);
+        Assert.True((bool)method.Invoke(null, [uint.MaxValue, true, 1u])!);
+        Assert.True((bool)method.Invoke(null, [3u, false, 2u])!);
+    }
+
+    [Fact]
     public async Task TransferRefresh_DoesNotCacheZoneBelowMinimumRecordCount()
     {
         using var loggerFactory = LoggerFactory.Create(_ => { });

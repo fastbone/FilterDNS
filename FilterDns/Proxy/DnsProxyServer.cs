@@ -556,25 +556,13 @@ public class DnsProxyServer : BackgroundService
             var cachedSerial = _cache.GetSerial(zoneName);
             var cachedZoneCheck = _cache.GetZone(zoneName);
 
-            // If cache is empty (after restart), always fetch to populate it
-            // This prevents empty zones on slaves when they initiate transfers after receiving NOTIFY
-            if (cachedSerial == null || cachedZoneCheck == null || cachedZoneCheck.Records.Count == 0)
+            var cacheHasRecords = cachedZoneCheck != null && cachedZoneCheck.Records.Count > 0;
+            if (!ShouldFetchFromUpstream(cachedSerial, cacheHasRecords, upstreamSerial))
             {
-                _logger.LogInformation("{Prefix}: Zone {Zone} cache is empty or invalid, fetching from upstream (serial: {Serial})", 
-                    logPrefix, zoneName, upstreamSerial);
-                // Continue to fetch below
-            }
-            // If serial hasn't changed, skip the update but still notify slaves if this was triggered by NOTIFY
-            // This ensures slaves are notified even if our serial check shows no change (handles race conditions)
-            else if (cachedSerial == upstreamSerial)
-            {
-                _logger.LogInformation("{Prefix}: Zone {Zone} serial unchanged ({Serial}), no update needed", 
-                    logPrefix, zoneName, upstreamSerial);
+                _logger.LogInformation("{Prefix}: Zone {Zone} upstream serial {UpstreamSerial} is not newer than cached serial {CachedSerial}, no update needed",
+                    logPrefix, zoneName, upstreamSerial, cachedSerial ?? 0);
                 
-                // If triggered by NOTIFY, still send NOTIFY to slaves to ensure they check for updates
-                // This handles cases where upstream sent NOTIFY but our serial check shows unchanged
-                // This prevents empty zones on slaves when they initiate transfers after receiving NOTIFY
-                if (triggeredByNotify)
+                if (triggeredByNotify && cachedSerial == upstreamSerial)
                 {
                     if (_notifySenders.TryGetValue(zoneName, out var notifySenderForUnchanged))
                     {
@@ -1231,6 +1219,16 @@ public class DnsProxyServer : BackgroundService
         }
 
         return referenceSerial - (ulong)candidateSerial > halfSerialSpace;
+    }
+
+    private static bool ShouldFetchFromUpstream(uint? cachedSerial, bool cacheHasRecords, uint upstreamSerial)
+    {
+        if (cachedSerial == null || !cacheHasRecords)
+        {
+            return true;
+        }
+
+        return IsSerialNewer(upstreamSerial, cachedSerial.Value);
     }
 
     /// <summary>

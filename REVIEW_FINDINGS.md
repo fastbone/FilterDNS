@@ -2,7 +2,7 @@
 
 ## Summary
 
-FilterDNS is a single .NET console DNS proxy. It pulls zones from an upstream master over AXFR, rewrites SOA/NS records, optionally filters private A/AAAA data, stores file-backed zone history, then serves AXFR/IXFR to slaves and ACL-gated health-check queries. The highest-risk paths are DNS wire parsing, ACL/range matching, zone history persistence, IXFR diffing, and cache-update side effects. The codebase builds cleanly, but several normal DNS scenarios can still produce corrupt transfers, refused transfers, or silent operational failures.
+FilterDNS is a single .NET console DNS proxy. It pulls zones from an upstream master over AXFR, rewrites SOA/NS records, optionally filters private A/AAAA data, stores file-backed zone history, then serves AXFR/IXFR to slaves and ACL-gated health-check queries. This audit found 19 issues across DNS wire parsing, ACL/range matching, zone history persistence, IXFR diffing, cache-update side effects, recovery, validation, and storage hardening. All findings listed below are fixed in this branch and covered by focused regression tests where practical.
 
 Total findings: 19
 
@@ -11,13 +11,7 @@ Total findings: 19
 - Medium: 8
 - Low: 2
 
-Fix first:
-
-1. Fix persisted history RDATA loss before trusting IXFR after restart.
-2. Replace the shared CIDR matcher before relying on whitelists or private-IP filtering.
-3. Fix IXFR/RRset diff identity so duplicate records and TTL changes are not lost.
-4. Normalize zone names at configuration load so mixed-case zones do not break external DNS paths.
-5. Remove cache-update side effects from health checks and transfer-triggered refreshes.
+Fix status: all findings are complete in this branch.
 
 ### Fix Progress
 

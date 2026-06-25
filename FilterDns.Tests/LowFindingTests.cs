@@ -31,6 +31,22 @@ public class LowFindingTests
         Assert.Throws<SecurityException>(() => InvokeValidatePath(storage, symlinkPath, baseDirectory));
     }
 
+    [Fact]
+    public void ZoneHistoryStorage_RejectsSymlinkedAncestorDirectory()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"filterdns-low-{Guid.NewGuid():N}");
+        var dataDirectory = Path.Combine(root, "data");
+        var outsideDirectory = Path.Combine(root, "outside");
+        Directory.CreateDirectory(dataDirectory);
+        Directory.CreateDirectory(outsideDirectory);
+        var historyLink = Path.Combine(dataDirectory, "history");
+        Directory.CreateSymbolicLink(historyLink, outsideDirectory);
+        var storage = new ZoneHistoryStorage(dataDirectory, exportBindZoneFiles: false);
+
+        Assert.Throws<SecurityException>(() =>
+            InvokeValidatePath(storage, Path.Combine(historyLink, "example_com.json"), dataDirectory));
+    }
+
     private static void InvokeValidatePath(ZoneHistoryStorage storage, string filePath, string baseDirectory)
     {
         var method = typeof(ZoneHistoryStorage).GetMethod(
