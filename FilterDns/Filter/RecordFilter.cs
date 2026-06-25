@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using DnsClient;
 using DnsClient.Protocol;
 using FilterDns.Config;
+using FilterDns.Net;
 
 namespace FilterDns.Filter;
 
@@ -16,6 +17,7 @@ public class FilteredRecord
     public DnsResourceRecord OriginalRecord { get; set; } = null!;
     public SoaRecordData? SoaData { get; set; }
     public string? NsName { get; set; }
+    public byte[]? RawRData { get; set; }
 }
 
 public class SoaRecordData
@@ -246,30 +248,7 @@ public class RecordFilter
     /// </summary>
     private static bool IsInCidrRange(IPAddress address, IPAddress networkAddress, int prefixLength)
     {
-        var addressBytes = address.GetAddressBytes();
-        var networkBytes = networkAddress.GetAddressBytes();
-        
-        if (addressBytes.Length != networkBytes.Length)
-            return false;
-        
-        var byteLength = (prefixLength + 7) / 8; // Number of bytes to compare
-        
-        for (int i = 0; i < byteLength; i++)
-        {
-            if (addressBytes[i] != networkBytes[i])
-                return false;
-        }
-        
-        // Check remaining bits if prefix length is not byte-aligned
-        if (prefixLength % 8 != 0)
-        {
-            var bitsInLastByte = prefixLength % 8;
-            var mask = (byte)(0xFF << (8 - bitsInLastByte));
-            if ((addressBytes[byteLength] & mask) != (networkBytes[byteLength] & mask))
-                return false;
-        }
-        
-        return true;
+        return new CidrRange(networkAddress, prefixLength).Contains(address);
     }
 
     /// <summary>

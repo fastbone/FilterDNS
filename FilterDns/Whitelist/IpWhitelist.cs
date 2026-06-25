@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using FilterDns.Net;
 
 namespace FilterDns.Whitelist;
 
@@ -44,41 +45,16 @@ public class IpWhitelist
 
     private class IPNetwork
     {
-        private readonly IPAddress _networkAddress;
-        private readonly int _prefixLength;
-        private readonly byte[] _networkBytes;
-        private readonly int _byteLength;
+        private readonly CidrRange _range;
 
         public IPNetwork(IPAddress address, int prefixLength)
         {
-            _networkAddress = address;
-            _prefixLength = prefixLength;
-            _networkBytes = address.GetAddressBytes();
-            _byteLength = (prefixLength + 7) / 8; // Number of bytes to compare
+            _range = new CidrRange(address, prefixLength);
         }
 
         public bool Contains(IPAddress address)
         {
-            var addressBytes = address.GetAddressBytes();
-            if (addressBytes.Length != _networkBytes.Length)
-                return false;
-
-            for (int i = 0; i < _byteLength; i++)
-            {
-                if (addressBytes[i] != _networkBytes[i])
-                    return false;
-            }
-
-            // Check remaining bits if prefix length is not byte-aligned
-            if (_prefixLength % 8 != 0)
-            {
-                var bitsInLastByte = _prefixLength % 8;
-                var mask = (byte)(0xFF << (8 - bitsInLastByte));
-                if ((addressBytes[_byteLength] & mask) != (_networkBytes[_byteLength] & mask))
-                    return false;
-            }
-
-            return true;
+            return _range.Contains(address);
         }
     }
 }

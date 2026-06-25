@@ -144,7 +144,11 @@ public static class DnsRecordBuilder
 
     private static byte[] SerializeRdata(FilteredRecord record)
     {
-        if (record.SoaData != null)
+        if (record.RawRData is { Length: > 0 })
+        {
+            return record.RawRData.ToArray();
+        }
+        else if (record.SoaData != null)
         {
             return SerializeSoa(record.SoaData);
         }
@@ -164,7 +168,11 @@ public static class DnsRecordBuilder
         Dictionary<string, int> nameCompression,
         string zoneName)
     {
-        if (record.SoaData != null)
+        if (record.RawRData is { Length: > 0 })
+        {
+            return record.RawRData.ToArray();
+        }
+        else if (record.SoaData != null)
         {
             return SerializeSoaWithCompression(record.SoaData, nameCompression, zoneName);
         }

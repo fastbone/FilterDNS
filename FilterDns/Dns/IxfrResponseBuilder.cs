@@ -365,6 +365,11 @@ public static class IxfrResponseBuilder
     /// </summary>
     private static byte[] SerializeRdataWithoutCompression(FilteredRecord record)
     {
+        if (record.RawRData is { Length: > 0 })
+        {
+            return record.RawRData.ToArray();
+        }
+
         if (record.SoaData != null)
         {
             return SerializeSoaRdataWithoutCompression(record.SoaData);

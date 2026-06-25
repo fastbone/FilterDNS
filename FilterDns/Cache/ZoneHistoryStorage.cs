@@ -2,9 +2,11 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text;
 using System.Security.Cryptography;
+using DnsClient.Protocol;
 using FilterDns.Export;
 using FilterDns.Filter;
 using FilterDns.Config;
+using FilterDns.Dns;
 using Microsoft.Extensions.Logging;
 
 namespace FilterDns.Cache;
@@ -503,12 +505,16 @@ public class ZoneHistoryStorage
             };
         }
 
-        // For records with OriginalRecord, we can't fully serialize them,
-        // so we'll need to reconstruct them on load from the zone data
-        // For now, we'll store a placeholder - in practice, we'd need to serialize
-        // the RDATA properly based on record type
-        // This is a limitation: we can't fully restore OriginalRecord from JSON
-        // But for IXFR purposes, we mainly need FilteredRecord data which we can restore
+        var rawRdata = RDataSerializer.Serialize(record);
+        if (rawRdata.Length > 0)
+        {
+            json.RawRdataBase64 = Convert.ToBase64String(rawRdata);
+        }
+        else if (RequiresRawRdata(json))
+        {
+            throw new InvalidOperationException(
+                $"Record {record.DomainName} type {record.RecordType} cannot be persisted without raw RDATA");
+        }
 
         return json;
     }
@@ -520,13 +526,20 @@ public class ZoneHistoryStorage
     /// </summary>
     private FilteredRecord ConvertFromJson(FilteredRecordJson json)
     {
+        if (string.IsNullOrEmpty(json.RawRdataBase64) && RequiresRawRdata(json))
+        {
+            throw new InvalidDataException(
+                $"Persisted record {json.DomainName} type {json.RecordType} is missing raw RDATA and cannot be safely used for IXFR");
+        }
+
         var record = new FilteredRecord
         {
             DomainName = json.DomainName,
-            RecordType = (DnsClient.Protocol.ResourceRecordType)json.RecordType,
+            RecordType = (ResourceRecordType)json.RecordType,
             RecordClass = (DnsClient.QueryClass)json.RecordClass,
             TimeToLive = json.TimeToLive,
             NsName = json.NsName,
+            RawRData = string.IsNullOrEmpty(json.RawRdataBase64) ? null : Convert.FromBase64String(json.RawRdataBase64),
             OriginalRecord = null! // Cannot restore from JSON
         };
 
@@ -545,6 +558,17 @@ public class ZoneHistoryStorage
         }
 
         return record;
+    }
+
+    private static bool RequiresRawRdata(FilteredRecordJson json)
+    {
+        var recordType = (ResourceRecordType)json.RecordType;
+        return recordType switch
+        {
+            ResourceRecordType.SOA => json.SoaData == null,
+            ResourceRecordType.NS => string.IsNullOrEmpty(json.NsName),
+            _ => true
+        };
     }
 
     /// <summary>
@@ -688,12 +712,22 @@ public class ZoneHistoryStorage
         
         // Include a hash of record data for stronger integrity
         var recordsHash = string.Join("|", records.Select(r => 
-            $"{r.DomainName}:{r.RecordType}:{r.RecordClass}:{r.TimeToLive}"));
+            $"{r.DomainName}:{r.RecordType}:{r.RecordClass}:{r.TimeToLive}:{r.NsName}:{r.RawRdataBase64}:{SerializeSoaForHash(r.SoaData)}"));
         
         hashInput += $"|{recordsHash}";
         
         var inputBytes = System.Text.Encoding.UTF8.GetBytes(hashInput);
         var hashBytes = SHA256.HashData(inputBytes);
         return Convert.ToHexString(hashBytes).ToLowerInvariant();
+    }
+
+    private static string SerializeSoaForHash(SoaRecordDataJson? soaData)
+    {
+        if (soaData == null)
+        {
+            return string.Empty;
+        }
+
+        return $"{soaData.MName}:{soaData.RName}:{soaData.Serial}:{soaData.Refresh}:{soaData.Retry}:{soaData.Expire}:{soaData.Minimum}";
     }
 }

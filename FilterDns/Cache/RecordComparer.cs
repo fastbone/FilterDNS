@@ -1,8 +1,7 @@
-using System.Net;
-using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using DnsClient.Protocol;
+using FilterDns.Dns;
 using FilterDns.Filter;
 
 namespace FilterDns.Cache;
@@ -32,6 +31,9 @@ public static class RecordComparer
         if (a.RecordClass != b.RecordClass)
             return false;
 
+        if (a.TimeToLive != b.TimeToLive)
+            return false;
+
         // Compare RDATA based on record type
         return CompareRdata(a, b);
     }
@@ -48,7 +50,7 @@ public static class RecordComparer
         var domainName = record.DomainName.TrimEnd('.').ToLowerInvariant();
         var rdataHash = GetRdataHash(record);
 
-        return $"{domainName}|{(int)record.RecordType}|{(int)record.RecordClass}|{rdataHash}";
+        return $"{domainName}|{(int)record.RecordType}|{(int)record.RecordClass}|{record.TimeToLive}|{rdataHash}";
     }
 
     /// <summary>
@@ -79,23 +81,6 @@ public static class RecordComparer
             return string.Equals(aNsName, bNsName, StringComparison.OrdinalIgnoreCase);
         }
 
-        // A records: compare IP address
-        if (a.RecordType == ResourceRecordType.A)
-        {
-            var aIp = ExtractIpAddress(a, AddressFamily.InterNetwork);
-            var bIp = ExtractIpAddress(b, AddressFamily.InterNetwork);
-            return aIp != null && bIp != null && aIp.Equals(bIp);
-        }
-
-        // AAAA records: compare IPv6 address
-        if (a.RecordType == ResourceRecordType.AAAA)
-        {
-            var aIp = ExtractIpAddress(a, AddressFamily.InterNetworkV6);
-            var bIp = ExtractIpAddress(b, AddressFamily.InterNetworkV6);
-            return aIp != null && bIp != null && aIp.Equals(bIp);
-        }
-
-        // For other record types, compare raw RDATA
         return CompareRawRdata(a, b);
     }
 
@@ -116,14 +101,6 @@ public static class RecordComparer
             return ComputeHash(nsName ?? string.Empty);
         }
 
-        if (record.RecordType == ResourceRecordType.A || record.RecordType == ResourceRecordType.AAAA)
-        {
-            var ip = ExtractIpAddress(record, 
-                record.RecordType == ResourceRecordType.A ? AddressFamily.InterNetwork : AddressFamily.InterNetworkV6);
-            return ComputeHash(ip?.ToString() ?? string.Empty);
-        }
-
-        // For other types, use raw RDATA
         var rawRdata = GetRawRdata(record);
         return ComputeHash(Convert.ToBase64String(rawRdata));
     }
@@ -153,60 +130,7 @@ public static class RecordComparer
     /// </summary>
     private static byte[] GetRawRdata(FilteredRecord record)
     {
-        if (record.OriginalRecord != null)
-        {
-            // Try to get raw RDATA from original record using reflection
-            var rawRdata = TryGetRawRdataFromOriginal(record.OriginalRecord);
-            if (rawRdata != null && rawRdata.Length > 0)
-            {
-                return rawRdata;
-            }
-        }
-
-        // Fallback: serialize based on known types
-        return record.RecordType switch
-        {
-            ResourceRecordType.SOA when record.SoaData != null => SerializeSoaRdata(record.SoaData),
-            ResourceRecordType.NS when record.NsName != null => SerializeNsRdata(record.NsName),
-            _ => Array.Empty<byte>()
-        };
-    }
-
-    /// <summary>
-    /// Tries to extract raw RDATA from DnsResourceRecord using reflection.
-    /// </summary>
-    private static byte[]? TryGetRawRdataFromOriginal(DnsResourceRecord record)
-    {
-        try
-        {
-            // Try to access Raw property
-            var rawProperty = record.GetType().GetProperty("Raw", 
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-            if (rawProperty?.PropertyType == typeof(byte[]))
-            {
-                var rawValue = rawProperty.GetValue(record) as byte[];
-                if (rawValue != null && rawValue.Length > 0)
-                {
-                    // Extract RDATA portion (skip name, type, class, TTL - typically 12-16 bytes)
-                    // This is a simplified approach - full parsing would be more accurate
-                    if (rawValue.Length > 16)
-                    {
-                        // Find RDATA length (2 bytes after TTL)
-                        var rdataLength = (rawValue[rawValue.Length - 2] << 8) | rawValue[rawValue.Length - 1];
-                        // For now, return the last portion which should contain RDATA
-                        // In practice, we'd need proper DNS record parsing
-                        return rawValue;
-                    }
-                    return rawValue;
-                }
-            }
-        }
-        catch
-        {
-            // Reflection failed, fall back to type-specific serialization
-        }
-
-        return null;
+        return RDataSerializer.Serialize(record);
     }
 
     /// <summary>
@@ -219,77 +143,6 @@ public static class RecordComparer
             return nsRecord.NSDName.Value;
         }
         return null;
-    }
-
-    /// <summary>
-    /// Extracts IP address from record.
-    /// </summary>
-    private static IPAddress? ExtractIpAddress(FilteredRecord record, AddressFamily family)
-    {
-        if (record.OriginalRecord is ARecord aRecord && family == AddressFamily.InterNetwork)
-        {
-            return aRecord.Address;
-        }
-
-        if (record.OriginalRecord is AaaaRecord aaaaRecord && family == AddressFamily.InterNetworkV6)
-        {
-            return aaaaRecord.Address;
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// Serializes SOA RDATA.
-    /// </summary>
-    private static byte[] SerializeSoaRdata(SoaRecordData soa)
-    {
-        var data = new List<byte>();
-        WriteDomainName(data, soa.MName);
-        WriteDomainName(data, soa.RName);
-        WriteUInt32(data, soa.Serial);
-        WriteUInt32(data, soa.Refresh);
-        WriteUInt32(data, soa.Retry);
-        WriteUInt32(data, soa.Expire);
-        WriteUInt32(data, soa.Minimum);
-        return data.ToArray();
-    }
-
-    /// <summary>
-    /// Serializes NS RDATA.
-    /// </summary>
-    private static byte[] SerializeNsRdata(string nsName)
-    {
-        var data = new List<byte>();
-        WriteDomainName(data, nsName);
-        return data.ToArray();
-    }
-
-    /// <summary>
-    /// Writes a domain name in DNS format.
-    /// </summary>
-    private static void WriteDomainName(List<byte> data, string name)
-    {
-        var parts = name.TrimEnd('.').Split('.');
-        foreach (var part in parts)
-        {
-            if (string.IsNullOrEmpty(part)) continue;
-            var partBytes = Encoding.UTF8.GetBytes(part);
-            data.Add((byte)partBytes.Length);
-            data.AddRange(partBytes);
-        }
-        data.Add(0); // Terminator
-    }
-
-    /// <summary>
-    /// Writes a 32-bit unsigned integer in network byte order.
-    /// </summary>
-    private static void WriteUInt32(List<byte> data, uint value)
-    {
-        data.Add((byte)(value >> 24));
-        data.Add((byte)(value >> 16));
-        data.Add((byte)(value >> 8));
-        data.Add((byte)(value & 0xFF));
     }
 
     /// <summary>

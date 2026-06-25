@@ -19,11 +19,19 @@ Fix first:
 4. Normalize zone names at configuration load so mixed-case zones do not break external DNS paths.
 5. Remove cache-update side effects from health checks and transfer-triggered refreshes.
 
+### Critical Fix Progress
+
+- [x] **SEV-01:** Fixed in this branch. Added persisted raw RDATA round-trip coverage in `FilterDns.Tests/CriticalFindingTests.cs`.
+- [x] **SEV-02:** Fixed in this branch. Added diff coverage for TTL-only changes and loaded same-name A records with distinct RDATA.
+- [x] **SEV-03:** Fixed in this branch. Added CIDR coverage for non-byte-aligned IPv4 whitelist ranges and custom IPv6 private ranges.
+- [ ] **SEV-04+ follow-ups:** Not started in this pass.
+
 ## Findings
 
 ### [SEV-01] Persisted history drops RDATA and can corrupt IXFR after restart
 
 - **Severity:** Critical
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Cache/ZoneHistoryStorage.cs:26-34`, `FilterDns/Cache/ZoneHistoryStorage.cs:481-530`, `FilterDns/Dns/IxfrResponseBuilder.cs:378-455`
 - **What's wrong:** JSON history declares `RawRdataBase64`, but `ConvertToJson` never writes it and `ConvertFromJson` restores `OriginalRecord = null`. `IxfrResponseBuilder.SerializeRdataWithoutCompression` returns empty RDATA when a loaded non-SOA/non-NS record has no `OriginalRecord`.
@@ -35,6 +43,7 @@ Fix first:
 ### [SEV-02] IXFR diff keys collapse duplicate RRsets and omit TTL changes
 
 - **Severity:** Critical
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Cache/RecordComparer.cs:43-52`, `FilterDns/Cache/RecordComparer.cs:119-128`, `FilterDns/Cache/RecordComparer.cs:154-172`, `FilterDns/Cache/RecordComparer.cs:227-239`, `FilterDns/Xfer/ZoneDiffCalculator.cs:45-80`
 - **What's wrong:** `ZoneDiffCalculator` uses one dictionary entry per record key. When `OriginalRecord` is null, A/AAAA and unknown-type RDATA hashes become the hash of an empty string, so multiple records at the same owner/type/class collapse into one key. TTL is not included in equality or keys, so TTL-only updates are invisible.
@@ -46,6 +55,7 @@ Fix first:
 ### [SEV-03] Custom CIDR matching breaks ACLs and private-IP filtering
 
 - **Severity:** Critical
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Filter/RecordFilter.cs:195-204`, `FilterDns/Filter/RecordFilter.cs:223-272`, `FilterDns/Whitelist/IpWhitelist.cs:10-27`, `FilterDns/Whitelist/IpWhitelist.cs:52-81`
 - **What's wrong:** Both `RecordFilter` and `IpWhitelist` compute `(prefixLength + 7) / 8`, compare that many full bytes, then also read the next byte for partial prefixes. Non-byte-aligned prefixes such as `/25`, `/17`, `/7`, and `/10` are evaluated incorrectly; exact network addresses can hit `IndexOutOfRangeException`. Invalid prefix lengths are accepted.
