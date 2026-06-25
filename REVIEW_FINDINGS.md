@@ -21,7 +21,7 @@ Fix first:
 
 ### Critical Fix Progress
 
-- [x] **SEV-01:** Fixed in this branch. Added persisted raw RDATA round-trip coverage in `FilterDns.Tests/CriticalFindingTests.cs`.
+- [x] **SEV-01:** Fixed in this branch. Added persisted raw RDATA round-trip coverage in `FilterDns.Tests/CriticalFindingTests.cs`; invalid legacy history files are now archived to compressed backups and removed from the active history path.
 - [x] **SEV-02:** Fixed in this branch. Added diff coverage for TTL-only changes and loaded same-name A records with distinct RDATA.
 - [x] **SEV-03:** Fixed in this branch. Added CIDR coverage for non-byte-aligned IPv4 whitelist ranges and custom IPv6 private ranges.
 - [ ] **SEV-04+ follow-ups:** Not started in this pass.

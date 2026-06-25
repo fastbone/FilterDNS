@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text;
 using System.Security.Cryptography;
+using System.IO.Compression;
 using DnsClient.Protocol;
 using FilterDns.Export;
 using FilterDns.Filter;
@@ -412,6 +413,7 @@ public class ZoneHistoryStorage
             {
                 _logger?.LogWarning("Failed to deserialize zone history for {ZoneName} from {FilePath}",
                     zoneName, filePath);
+                QuarantineInvalidHistoryFile(filePath, zoneName, "deserialized history was null");
                 return null;
             }
 
@@ -428,12 +430,8 @@ public class ZoneHistoryStorage
                     var calculatedHash = CalculateZoneVersionHash(versionJson.Serial, versionJson.Records, versionJson.Timestamp);
                     if (calculatedHash != versionJson.Hash)
                     {
-                        _logger?.LogWarning(
-                            "Zone history integrity check failed for {ZoneName} version {Serial}: hash mismatch. Expected {ExpectedHash}, got {CalculatedHash}",
-                            zoneName, versionJson.Serial, versionJson.Hash, calculatedHash);
-                        
-                        // Reject corrupted version - don't add to history
-                        continue;
+                        throw new InvalidDataException(
+                            $"Zone history integrity check failed for {zoneName} version {versionJson.Serial}: hash mismatch. Expected {versionJson.Hash}, got {calculatedHash}");
                     }
                 }
                 
@@ -450,7 +448,53 @@ public class ZoneHistoryStorage
         {
             _logger?.LogError(ex, "Failed to load zone history for {ZoneName} from {FilePath}",
                 zoneName, filePath);
+            QuarantineInvalidHistoryFile(filePath, zoneName, ex.Message);
             return null;
+        }
+    }
+
+    private void QuarantineInvalidHistoryFile(string filePath, string zoneName, string reason)
+    {
+        if (!File.Exists(filePath))
+        {
+            return;
+        }
+
+        try
+        {
+            var historyDir = Path.Combine(_dataDirectory, "history");
+            var invalidDir = Path.Combine(historyDir, "invalid");
+            Directory.CreateDirectory(invalidDir);
+            ValidatePathWithinDirectory(invalidDir, _dataDirectory);
+
+            var sanitizedZoneName = SanitizeZoneName(zoneName);
+            var timestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
+            var archivePath = Path.Combine(invalidDir, $"{sanitizedZoneName}_{timestamp}.zip");
+            ValidatePathWithinDirectory(archivePath, _dataDirectory);
+
+            using (var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+            {
+                archive.CreateEntryFromFile(filePath, Path.GetFileName(filePath), CompressionLevel.Optimal);
+                var reasonEntry = archive.CreateEntry("reason.txt", CompressionLevel.Optimal);
+                using var writer = new StreamWriter(reasonEntry.Open(), Encoding.UTF8);
+                writer.WriteLine($"Zone: {zoneName}");
+                writer.WriteLine($"OriginalPath: {filePath}");
+                writer.WriteLine($"ArchivedAtUtc: {DateTime.UtcNow:O}");
+                writer.WriteLine($"Reason: {reason}");
+            }
+
+            File.Delete(filePath);
+            _logger?.LogWarning(
+                "Archived invalid zone history for {ZoneName} to {ArchivePath} and removed active file {FilePath}",
+                zoneName, archivePath, filePath);
+        }
+        catch (Exception archiveEx)
+        {
+            _logger?.LogError(
+                archiveEx,
+                "Failed to archive invalid zone history for {ZoneName} at {FilePath}; leaving active file in place",
+                zoneName,
+                filePath);
         }
     }
 

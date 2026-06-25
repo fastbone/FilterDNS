@@ -1,4 +1,5 @@
 using System.Net;
+using System.IO.Compression;
 using DnsClient;
 using DnsClient.Protocol;
 using FilterDns.Cache;
@@ -189,8 +190,9 @@ public class CriticalFindingTests
         var dataDirectory = Path.Combine(Path.GetTempPath(), $"filterdns-tests-{Guid.NewGuid():N}");
         var historyDirectory = Path.Combine(dataDirectory, "history");
         Directory.CreateDirectory(historyDirectory);
+        var historyFilePath = Path.Combine(historyDirectory, "example_com.json");
         await File.WriteAllTextAsync(
-            Path.Combine(historyDirectory, "example_com.json"),
+            historyFilePath,
             """
             [
               {
@@ -212,6 +214,11 @@ public class CriticalFindingTests
         var loaded = await storage.LoadAsync("example.com");
 
         Assert.Null(loaded);
+        Assert.False(File.Exists(historyFilePath));
+        var archivePath = Assert.Single(Directory.GetFiles(Path.Combine(historyDirectory, "invalid"), "example_com_*.zip"));
+        using var archive = ZipFile.OpenRead(archivePath);
+        Assert.Contains(archive.Entries, entry => entry.FullName == "example_com.json");
+        Assert.Contains(archive.Entries, entry => entry.FullName == "reason.txt");
     }
 
     [Fact]
