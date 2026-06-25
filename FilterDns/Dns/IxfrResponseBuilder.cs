@@ -446,7 +446,6 @@ public static class IxfrResponseBuilder
                     data.Add((byte)tagBytes.Length);
                     data.AddRange(tagBytes);
                     var valueBytes = System.Text.Encoding.UTF8.GetBytes(caa.Value);
-                    data.Add((byte)valueBytes.Length);
                     data.AddRange(valueBytes);
                     return data.ToArray();
                     

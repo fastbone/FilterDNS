@@ -45,7 +45,7 @@ class Program
         }
 
         // Validate configuration
-        ValidateConfiguration(appConfig);
+        ConfigurationValidator.Validate(appConfig);
 
         // Configure logging
         var loggingConfig = appConfig.Server.Logging ?? new LoggingConfig();
@@ -170,6 +170,7 @@ class Program
 
         var appConfig = new AppConfiguration();
         configuration.Bind(appConfig);
+        ConfigurationValidator.Validate(appConfig);
 
         // Find zone configuration
         var zoneConfig = appConfig.Zones?.FirstOrDefault(z => 

@@ -281,17 +281,18 @@ public class ZoneHistoryStorage
 
         try
         {
-            // Check version count limit and prune if needed
             var allVersions = history.GetAllVersions().Values.ToList();
             if (hardeningEnabled && allVersions.Count > maxVersions)
             {
                 _logger?.LogWarning(
-                    "Zone history for {ZoneName} has {VersionCount} versions, exceeds maximum ({MaxVersions}). Pruning oldest versions.",
+                    "Zone history for {ZoneName} has {VersionCount} versions, exceeds maximum ({MaxVersions}). Saving only the newest versions.",
                     history.ZoneName, allVersions.Count, maxVersions);
-                
-                // Prune oldest versions to stay within limit
-                history.PruneOldVersions(maxVersions);
-                allVersions = history.GetAllVersions().Values.ToList();
+
+                allVersions = allVersions
+                    .OrderByDescending(v => v.Timestamp)
+                    .ThenByDescending(v => v.Serial)
+                    .Take(maxVersions)
+                    .ToList();
             }
 
             // Convert to JSON format
@@ -342,12 +343,15 @@ public class ZoneHistoryStorage
             // Write to temp file
             await File.WriteAllBytesAsync(tempFilePath, jsonBytes);
 
-            // Atomic rename
+            // Atomic replace without deleting the last known-good history first.
             if (File.Exists(filePath))
             {
-                File.Delete(filePath);
+                File.Replace(tempFilePath, filePath, null);
             }
-            File.Move(tempFilePath, filePath);
+            else
+            {
+                File.Move(tempFilePath, filePath);
+            }
 
             // Also save each version as a BIND format zone file for human reference (if enabled)
             if (_exportBindZoneFiles)

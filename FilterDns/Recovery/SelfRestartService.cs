@@ -13,6 +13,10 @@ public class SelfRestartService
 {
     private readonly SelfRestartConfig _config;
     private readonly ILogger<SelfRestartService> _logger;
+    private readonly Action<int> _exitAction;
+    private readonly Func<DateTime> _utcNow;
+    private readonly Queue<DateTime> _restartAttempts;
+    private readonly string? _restartHistoryFilePath;
     private readonly DateTime _startTime;
     private readonly ConcurrentDictionary<string, int> _zoneFailureCounts = new();
     private readonly ConcurrentDictionary<string, int> _verificationFailureCounts = new();
@@ -20,11 +24,21 @@ public class SelfRestartService
     private bool _restartTriggered = false;
     private readonly object _restartLock = new();
 
-    public SelfRestartService(SelfRestartConfig? config, ILogger<SelfRestartService> logger)
+    public SelfRestartService(
+        SelfRestartConfig? config,
+        ILogger<SelfRestartService> logger,
+        Action<int>? exitAction = null,
+        Func<DateTime>? utcNow = null,
+        IEnumerable<DateTime>? existingRestartAttempts = null,
+        string? restartHistoryFilePath = null)
     {
         _config = config ?? new SelfRestartConfig();
         _logger = logger;
-        _startTime = DateTime.UtcNow;
+        _exitAction = exitAction ?? Environment.Exit;
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _restartHistoryFilePath = restartHistoryFilePath ?? Path.Combine(AppContext.BaseDirectory, "self-restart-history.txt");
+        _restartAttempts = new Queue<DateTime>(existingRestartAttempts ?? LoadRestartAttempts(_restartHistoryFilePath));
+        _startTime = _utcNow();
 
         if (_config.Enabled)
         {
@@ -162,7 +176,8 @@ public class SelfRestartService
             }
 
             // Check minimum uptime
-            var uptime = (DateTime.UtcNow - _startTime).TotalSeconds;
+            var now = _utcNow();
+            var uptime = (now - _startTime).TotalSeconds;
             if (uptime < _config.MinimumUptimeBeforeRestartSeconds)
             {
                 _logger.LogWarning(
@@ -172,6 +187,16 @@ public class SelfRestartService
                 return;
             }
 
+            if (RestartWindowLimitReached(now))
+            {
+                _logger.LogError(
+                    "Self-restart requested but restart window limit reached | MaxRestarts={MaxRestarts} | WindowSeconds={WindowSeconds} | Reason={Reason}",
+                    _config.MaxRestartsInWindow, _config.RestartWindowSeconds, reason);
+                return;
+            }
+
+            _restartAttempts.Enqueue(now);
+            SaveRestartAttempts();
             _restartTriggered = true;
 
             _logger.LogError(
@@ -192,15 +217,71 @@ public class SelfRestartService
                         _config.RestartExitCode);
 
                     // Exit with specific code - service manager should restart us
-                    Environment.Exit(_config.RestartExitCode);
+                    _exitAction(_config.RestartExitCode);
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Error during self-restart sequence");
                     // Force exit anyway
-                    Environment.Exit(_config.RestartExitCode);
+                    _exitAction(_config.RestartExitCode);
                 }
             });
+        }
+    }
+
+    private bool RestartWindowLimitReached(DateTime now)
+    {
+        if (_config.MaxRestartsInWindow <= 0)
+        {
+            return false;
+        }
+
+        var cutoff = now.AddSeconds(-_config.RestartWindowSeconds);
+        while (_restartAttempts.Count > 0 && _restartAttempts.Peek() < cutoff)
+        {
+            _restartAttempts.Dequeue();
+        }
+
+        return _restartAttempts.Count >= _config.MaxRestartsInWindow;
+    }
+
+    private static IEnumerable<DateTime> LoadRestartAttempts(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return [];
+        }
+
+        try
+        {
+            return File.ReadAllLines(path)
+                .Select(line => DateTime.TryParse(line, null, System.Globalization.DateTimeStyles.RoundtripKind, out var timestamp)
+                    ? timestamp
+                    : (DateTime?)null)
+                .Where(timestamp => timestamp.HasValue)
+                .Select(timestamp => timestamp!.Value)
+                .ToList();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private void SaveRestartAttempts()
+    {
+        if (string.IsNullOrWhiteSpace(_restartHistoryFilePath))
+        {
+            return;
+        }
+
+        try
+        {
+            File.WriteAllLines(_restartHistoryFilePath, _restartAttempts.Select(timestamp => timestamp.ToString("O")));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist self-restart history to {Path}", _restartHistoryFilePath);
         }
     }
 
@@ -212,7 +293,7 @@ public class SelfRestartService
         return (
             _consecutiveGlobalFailures,
             _zoneFailureCounts.Count,
-            DateTime.UtcNow - _startTime
+            _utcNow() - _startTime
         );
     }
 

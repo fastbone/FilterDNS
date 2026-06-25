@@ -67,13 +67,14 @@ public class DnsProxyServer : BackgroundService
         _notifySenders = new Dictionary<string, NotifySender>();
         _zoneHistories = new ConcurrentDictionary<string, ZoneHistory>();
         _zoneUpdateSemaphores = new ConcurrentDictionary<string, SemaphoreSlim>();
+        var dataDirectory = config.Server.DataDirectory ?? "./data";
 
         // Initialize self-restart service for recovery from unrecoverable situations
         var selfRestartLogger = _loggerFactory.CreateLogger<SelfRestartService>();
-        _selfRestartService = new SelfRestartService(config.Server.SelfRestart, selfRestartLogger);
+        var restartHistoryPath = Path.Combine(dataDirectory, "self-restart-history.txt");
+        _selfRestartService = new SelfRestartService(config.Server.SelfRestart, selfRestartLogger, restartHistoryFilePath: restartHistoryPath);
 
         // Initialize history storage if data directory is configured
-        var dataDirectory = config.Server.DataDirectory ?? "./data";
         var historyLogger = _loggerFactory.CreateLogger<ZoneHistoryStorage>();
         var exportBindZoneFiles = config.Server.ExportBindZoneFiles;
         var securityConfig = config.Server.Security;

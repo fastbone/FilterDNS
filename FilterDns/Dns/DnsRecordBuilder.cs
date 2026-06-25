@@ -398,11 +398,10 @@ public static class DnsRecordBuilder
         data.Add((byte)tagBytes.Length);
         data.AddRange(tagBytes);
         
-        // Value (length-prefixed binary data)
+        // Value is the remaining RDATA bytes; only the tag is length-prefixed.
         // CAA value is stored as a string in DnsClient, but RFC allows binary
         // We'll encode it as UTF-8 bytes
         var valueBytes = Encoding.UTF8.GetBytes(caa.Value);
-        data.Add((byte)valueBytes.Length);
         data.AddRange(valueBytes);
         
         return data.ToArray();

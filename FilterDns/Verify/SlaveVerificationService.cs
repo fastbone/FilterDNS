@@ -143,6 +143,42 @@ public class SlaveVerificationService
                                 _logger.LogWarning(ex, "Failed to re-trigger NOTIFY for zone {Zone} after mismatch", zoneName);
                             }
                         }
+
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                while (_pendingVerifications.TryGetValue(zoneName, out var pendingCts) && ReferenceEquals(pendingCts, cts))
+                                {
+                                    await Task.Delay(10, cancellationToken);
+                                }
+
+                                if (_pendingVerifications.ContainsKey(zoneName))
+                                {
+                                    _logger.LogDebug(
+                                        "Skipping retry verification for zone {Zone} because a newer verification is already pending",
+                                        zoneName);
+                                    return;
+                                }
+
+                                ScheduleVerification(
+                                    zoneName,
+                                    sentSerial,
+                                    sentRecordCount,
+                                    slaves,
+                                    delaySeconds,
+                                    recordCountTolerance,
+                                    notifySender,
+                                    cancellationToken,
+                                    clearHistoryCallback,
+                                    clearHistoryOnMismatch,
+                                    maxRetries);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                _logger.LogDebug("Retry verification scheduling cancelled for zone {Zone}", zoneName);
+                            }
+                        }, CancellationToken.None);
                     }
                     else
                     {
@@ -197,11 +233,11 @@ public class SlaveVerificationService
             finally
             {
                 // Clean up - only dispose after all tasks complete
-                if (_pendingVerifications.TryRemove(zoneName, out var removedCts))
+                if (_pendingVerifications.TryRemove(new KeyValuePair<string, CancellationTokenSource>(zoneName, cts)))
                 {
                     try
                     {
-                        removedCts.Dispose();
+                        cts.Dispose();
                     }
                     catch (ObjectDisposedException)
                     {
@@ -331,6 +367,11 @@ public class SlaveVerificationService
                         recordCountDifference, recordCountTolerance,
                         string.Join(", ", mismatchTypes));
                 }
+
+                _selfRestartService?.ReportVerificationFailure(
+                    zoneName,
+                    $"{slaveIp}:{slave.Port}",
+                    string.Join(",", mismatchTypes));
 
                 // Send email alert for verification issue
                 if (_emailAlertService != null)

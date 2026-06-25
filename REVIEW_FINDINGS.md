@@ -30,6 +30,14 @@ Fix first:
 - [x] **SEV-07:** Fixed in this branch. Transfer-triggered refreshes update cache/history through the proxy's per-zone lock and skip slave NOTIFY.
 - [x] **SEV-08:** Fixed in this branch. Added snapshot-based IXFR diff coverage.
 - [x] **SEV-09:** Fixed in this branch. Minimum record count is checked before poll/NOTIFY/transfer-refresh cache/history updates.
+- [x] **SEV-10:** Fixed in this branch. Added CAA wire-format coverage for query and IXFR responses.
+- [x] **SEV-11:** Fixed in this branch. AXFR uses exact preflight sizing before streaming.
+- [x] **SEV-12:** Fixed in this branch. NOTIFY responses are selected after zone/source validation.
+- [x] **SEV-13:** Fixed in this branch. UDP saturation now sends a SERVFAIL response.
+- [x] **SEV-14:** Fixed in this branch. Verification mismatches now schedule retry verification after re-NOTIFY.
+- [x] **SEV-15:** Fixed in this branch. Verification mismatches report to self-restart and restart window limits are enforced.
+- [x] **SEV-16:** Fixed in this branch. Startup/export use shared configuration validation.
+- [x] **SEV-17:** Fixed in this branch. History save no longer prunes the live model and replaces files atomically.
 
 ## Findings
 
@@ -144,6 +152,7 @@ Fix first:
 ### [SEV-10] CAA records are serialized with an invalid extra value-length byte
 
 - **Severity:** Medium
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Dns/DnsRecordBuilder.cs:377-399`, `FilterDns/Dns/IxfrResponseBuilder.cs:437-445`
 - **What's wrong:** RFC 6844 CAA RDATA is `flags`, `tag length`, `tag`, then `value` as the remaining bytes. Both serializers add an extra `value length` byte before the value.
@@ -155,6 +164,7 @@ Fix first:
 ### [SEV-11] AXFR size limit can abort after sending a partial transfer
 
 - **Severity:** Medium
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Xfer/XferHandler.cs:1207-1230`, `FilterDns/Xfer/XferHandler.cs:1261-1308`
 - **What's wrong:** There is a rough pre-check based on `recordCount * 100`, then exact byte checks while streaming. If the exact count exceeds `MaxZoneTransferSizeBytes` after the opening SOA or a later record, the method returns without sending a DNS error or a complete trailing SOA.
@@ -166,6 +176,7 @@ Fix first:
 ### [SEV-12] NOTIFY receive sends NOERROR before validating zone and source
 
 - **Severity:** Medium
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Xfer/XferHandler.cs:658-676`, `FilterDns/Xfer/XferHandler.cs:680-735`
 - **What's wrong:** The UDP NOTIFY handler sends `NoError` immediately for any SOA NOTIFY question, then checks whether the zone exists and whether the sender matches the configured upstream.
@@ -177,6 +188,7 @@ Fix first:
 ### [SEV-13] UDP concurrency limiting silently drops DNS packets
 
 - **Severity:** Medium
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Xfer/XferHandler.cs:215-229`
 - **What's wrong:** When `MaxConcurrentUdpRequests` is saturated, the server logs and `continue`s without any DNS response.
@@ -188,6 +200,7 @@ Fix first:
 ### [SEV-14] Verification mismatch recovery does not schedule a retry check
 
 - **Severity:** Medium
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Verify/SlaveVerificationService.cs:110-146`, `FilterDns/Verify/SlaveVerificationService.cs:181-187`
 - **What's wrong:** On mismatch within retry budget, the service may clear history and resend NOTIFY, then exits. It does not schedule another delayed verification for the same expected serial. The retry counter only advances if a later external `ScheduleVerification` call happens.
@@ -199,6 +212,7 @@ Fix first:
 ### [SEV-15] Self-restart verification and window-limit config is not wired
 
 - **Severity:** Medium
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Config/Configuration.cs:82-118`, `FilterDns/Recovery/SelfRestartService.cs:70-87`, `FilterDns/Recovery/SelfRestartService.cs:146-205`
 - **What's wrong:** `MaxRestartsInWindow` and `RestartWindowSeconds` are configured but never enforced. `ReportVerificationFailure` implements per-zone verification failure counting, but no verification code calls it.
@@ -210,6 +224,7 @@ Fix first:
 ### [SEV-16] Startup/export configuration validation misses important contract checks
 
 - **Severity:** Medium
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Program.cs:47-65`, `FilterDns/Program.cs:148-196`, `FilterDns/Program.cs:223-256`, `FilterDns/Upstream/UpstreamClient.cs:14-20`
 - **What's wrong:** Server startup validation only checks zones, `Ns1`/`Ns2`, and zone-name syntax. Export skips validation entirely. Invalid log levels throw `Enum.Parse` exceptions, malformed upstream/listen addresses fail later, duplicate zones overwrite silently, and invalid private ranges can silently keep records public.
@@ -221,6 +236,7 @@ Fix first:
 ### [SEV-17] History save can mutate live history and replace files non-atomically
 
 - **Severity:** Medium
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Cache/ZoneHistoryStorage.cs:281-291`, `FilterDns/Cache/ZoneHistoryStorage.cs:339-347`, `FilterDns/Cache/ZoneHistory.cs:143-176`
 - **What's wrong:** `SaveAsync` prunes the live `ZoneHistory` object as a side effect, while `UpdateZoneHistoryAsync` already prunes by effective history depth. The disk replace deletes the old file before moving the temp file into place.

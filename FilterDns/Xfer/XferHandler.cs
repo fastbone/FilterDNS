@@ -219,6 +219,9 @@ public class XferHandler
                         {
                             if (!await _udpRequestSemaphore.WaitAsync(0, cancellationToken))
                             {
+                                var overloadResponse = BuildUdpSaturationResponse(result.Buffer);
+                                await _udpClient.SendAsync(overloadResponse, result.RemoteEndPoint, cancellationToken);
+
                                 // Audit log
                                 if (_securityConfig?.EnableAuditLogging == true && _securityConfig?.AuditLogFailedTransfers == true)
                                 {
@@ -659,82 +662,60 @@ public class XferHandler
             // Handle NOTIFY messages
             if (request.OpCode == DnsOpCode.Notify)
             {
-                foreach (var question in request.Questions)
+                var soaQuestion = request.Questions.FirstOrDefault(q => q.QueryType == DnsQueryType.SOA);
+                if (soaQuestion != null)
                 {
-                    if (question.QueryType == DnsQueryType.SOA)
+                    var zoneName = soaQuestion.Name.TrimEnd('.');
+                    var zoneNameLookup = zoneName.ToLowerInvariant();
+
+                    _logger.LogInformation("Received NOTIFY for zone {Zone} from {RemoteEndPoint}",
+                        zoneName, remoteEndPoint);
+
+                    var responseCode = GetNotifyResponseCode(_zones, zoneNameLookup, remoteEndPoint.Address);
+                    var response = DnsMessageParser.BuildResponse(request, responseCode);
+                    await _udpClient.SendAsync(response, remoteEndPoint, cancellationToken);
+
+                    if (responseCode != DnsResponseCode.NoError)
                     {
-                        var zoneName = question.Name.TrimEnd('.');
-                        var zoneNameLookup = zoneName.ToLowerInvariant();
-                        
-                        _logger.LogInformation("Received NOTIFY for zone {Zone} from {RemoteEndPoint}", 
-                            zoneName, remoteEndPoint);
-                        
-                        // Send positive response immediately
-                        var response = DnsMessageParser.BuildResponse(request, DnsResponseCode.NoError);
-                        await _udpClient.SendAsync(response, remoteEndPoint, cancellationToken);
-                        
-                        // Find zone configuration
-                        if (_zones.TryGetValue(zoneNameLookup, out var zoneEntry))
+                        if (_securityConfig?.EnableAuditLogging == true && _securityConfig?.AuditLogUnauthorizedNotify == true)
                         {
-                            var (zoneConfig, _) = zoneEntry;
-                            
-                            // Check if NOTIFY is from upstream master
-                            var upstreamParts = zoneConfig.Upstream.Split(':');
-                            var upstreamIp = IPAddress.Parse(upstreamParts[0]);
-                            
-                            if (remoteEndPoint.Address.Equals(upstreamIp))
-                            {
-                                _logger.LogInformation(
-                                    "NOTIFY from upstream master {Upstream} for zone {Zone}, triggering zone transfer and slave notification",
-                                    zoneConfig.Upstream, zoneName);
-                                
-                                // Trigger zone update and slave notification
-                                if (_onNotifyReceived != null)
-                                {
-                                    _ = Task.Run(async () =>
-                                    {
-                                        try
-                                        {
-                                            await _onNotifyReceived(zoneName, zoneConfig, cancellationToken);
-                                        }
-                                        catch (Exception ex)
-                                        {
-                                            _logger.LogError(ex, 
-                                                "Error processing NOTIFY-triggered update for zone {Zone} from upstream {Upstream}",
-                                                zoneName, zoneConfig.Upstream);
-                                        }
-                                    }, cancellationToken);
-                                }
-                                else
-                                {
-                                    _logger.LogWarning(
-                                        "NOTIFY received from upstream but no handler configured for zone {Zone}",
-                                        zoneName);
-                                }
-                            }
-                            else
-                            {
-                                // Audit log unauthorized NOTIFY
-                                if (_securityConfig?.EnableAuditLogging == true && _securityConfig?.AuditLogUnauthorizedNotify == true)
-                                {
-                                    _logger.LogInformation(
-                                        "[AUDIT] Unauthorized NOTIFY: Zone {Zone} from {RemoteEndPoint} (not from upstream {Upstream})",
-                                        zoneName, remoteEndPoint, zoneConfig.Upstream);
-                                }
-                                else
-                                {
-                                    _logger.LogDebug(
-                                        "NOTIFY received for zone {Zone} from {RemoteEndPoint} (not from upstream {Upstream}), ignoring",
-                                        zoneName, remoteEndPoint, zoneConfig.Upstream);
-                                }
-                            }
+                            _logger.LogInformation(
+                                "[AUDIT] Refused NOTIFY: Zone {Zone} from {RemoteEndPoint}",
+                                zoneName, remoteEndPoint);
                         }
                         else
                         {
-                            _logger.LogWarning(
-                                "NOTIFY received for unknown zone {Zone} from {RemoteEndPoint}",
-                                zoneName, remoteEndPoint);
+                            _logger.LogDebug("Refused NOTIFY for zone {Zone} from {RemoteEndPoint}", zoneName, remoteEndPoint);
                         }
+                        return;
+                    }
+
+                    var (zoneConfig, _) = _zones[zoneNameLookup];
+                    _logger.LogInformation(
+                        "NOTIFY from upstream master {Upstream} for zone {Zone}, triggering zone transfer and slave notification",
+                        zoneConfig.Upstream, zoneName);
+
+                    if (_onNotifyReceived != null)
+                    {
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await _onNotifyReceived(zoneNameLookup, zoneConfig, cancellationToken);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex,
+                                    "Error processing NOTIFY-triggered update for zone {Zone} from upstream {Upstream}",
+                                    zoneName, zoneConfig.Upstream);
+                            }
+                        }, cancellationToken);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "NOTIFY received from upstream but no handler configured for zone {Zone}",
+                            zoneName);
                     }
                 }
             }
@@ -1207,14 +1188,13 @@ public class XferHandler
             // Check zone transfer size limit if hardening enabled
             if (hardeningEnabled && _securityConfig != null)
             {
-                // Estimate transfer size (rough estimate: ~100 bytes per record average)
-                var estimatedSize = recordCount * 100L;
+                var estimatedSize = CalculateAxfrTransferSizeBytes(zoneRecords, request.Id, zoneConfig.Name);
                 var maxSize = _securityConfig.MaxZoneTransferSizeBytes;
                 
                 if (estimatedSize > maxSize)
                 {
                     _logger.LogWarning(
-                        "Zone transfer rejected: Zone {Zone} estimated size ({EstimatedSize} bytes) exceeds maximum ({MaxSize} bytes)",
+                        "Zone transfer rejected: Zone {Zone} exact size ({EstimatedSize} bytes) exceeds maximum ({MaxSize} bytes)",
                         zoneName, estimatedSize, maxSize);
                     
                     // Audit log
@@ -1264,21 +1244,6 @@ public class XferHandler
                     var bytes = await SendRecordAsync(stream, soaRecord, request.Id, zoneConfig.Name, effectiveToken);
                     bytesTransferred += bytes;
                     
-                    // Check transfer size limit during transfer
-                    if (hardeningEnabled && _securityConfig != null && bytesTransferred > _securityConfig.MaxZoneTransferSizeBytes)
-                    {
-                        _logger.LogWarning(
-                            "Zone transfer aborted: Zone {Zone} transfer size ({BytesTransferred} bytes) exceeds maximum ({MaxSize} bytes)",
-                            zoneName, bytesTransferred, _securityConfig.MaxZoneTransferSizeBytes);
-                        
-                        if (_securityConfig.EnableAuditLogging == true && _securityConfig.AuditLogFailedTransfers == true)
-                        {
-                            _logger.LogInformation(
-                                "[AUDIT] Zone transfer aborted: Zone {Zone} from {RemoteEndPoint} - Transfer size ({BytesTransferred} bytes) exceeds limit ({MaxSize} bytes)",
-                                zoneName, remoteEndPoint, bytesTransferred, _securityConfig.MaxZoneTransferSizeBytes);
-                        }
-                        return;
-                    }
                 }
 
                 // Send all other records
@@ -1291,21 +1256,6 @@ public class XferHandler
                         bytesTransferred += bytes;
                         recordsSent++;
                         
-                        // Check transfer size limit during transfer
-                        if (hardeningEnabled && _securityConfig != null && bytesTransferred > _securityConfig.MaxZoneTransferSizeBytes)
-                        {
-                            _logger.LogWarning(
-                                "Zone transfer aborted: Zone {Zone} transfer size ({BytesTransferred} bytes) exceeds maximum ({MaxSize} bytes)",
-                                zoneName, bytesTransferred, _securityConfig.MaxZoneTransferSizeBytes);
-                            
-                            if (_securityConfig.EnableAuditLogging == true && _securityConfig.AuditLogFailedTransfers == true)
-                            {
-                                _logger.LogInformation(
-                                    "[AUDIT] Zone transfer aborted: Zone {Zone} from {RemoteEndPoint} - Transfer size ({BytesTransferred} bytes) exceeds limit ({MaxSize} bytes)",
-                                    zoneName, remoteEndPoint, bytesTransferred, _securityConfig.MaxZoneTransferSizeBytes);
-                            }
-                            return;
-                        }
                     }
                 }
 
@@ -1934,6 +1884,44 @@ public class XferHandler
         return 2 + response.Length;
     }
 
+    private static long CalculateAxfrTransferSizeBytes(
+        List<FilteredRecord> records,
+        ushort queryId,
+        string zoneName)
+    {
+        var soaRecord = records.FirstOrDefault(r => r.RecordType == ResourceRecordType.SOA);
+        long size = 0;
+
+        if (soaRecord != null)
+        {
+            size += CalculateTcpRecordMessageSize(soaRecord, queryId, zoneName);
+        }
+
+        foreach (var record in records)
+        {
+            if (record.RecordType != ResourceRecordType.SOA)
+            {
+                size += CalculateTcpRecordMessageSize(record, queryId, zoneName);
+            }
+        }
+
+        if (soaRecord != null)
+        {
+            size += CalculateTcpRecordMessageSize(soaRecord, queryId, zoneName);
+        }
+
+        return size;
+    }
+
+    private static long CalculateTcpRecordMessageSize(
+        FilteredRecord record,
+        ushort queryId,
+        string zoneName)
+    {
+        var response = DnsRecordBuilder.BuildZoneTransferResponse([record], queryId, zoneName);
+        return 2L + response.Length;
+    }
+
     private async Task HandleSoaQueryOnTcpAsync(
         NetworkStream stream,
         IPEndPoint remoteEndPoint,
@@ -2099,6 +2087,56 @@ public class XferHandler
         }
 
         return referenceSerial - (ulong)candidateSerial > halfSerialSpace;
+    }
+
+    private static DnsResponseCode GetNotifyResponseCode(
+        Dictionary<string, (ZoneConfig Config, IpWhitelist Whitelist)> zones,
+        string zoneName,
+        IPAddress remoteAddress)
+    {
+        var zoneLookup = zoneName.TrimEnd('.').ToLowerInvariant();
+        if (!zones.TryGetValue(zoneLookup, out var zoneEntry))
+        {
+            return DnsResponseCode.Refused;
+        }
+
+        var upstreamParts = zoneEntry.Config.Upstream.Split(':');
+        if (upstreamParts.Length == 0 || !IPAddress.TryParse(upstreamParts[0], out var upstreamIp))
+        {
+            return DnsResponseCode.Refused;
+        }
+
+        return AddressesEqual(remoteAddress, upstreamIp) ? DnsResponseCode.NoError : DnsResponseCode.Refused;
+    }
+
+    private static bool AddressesEqual(IPAddress left, IPAddress right)
+    {
+        if (left.Equals(right))
+        {
+            return true;
+        }
+
+        if (left.IsIPv4MappedToIPv6)
+        {
+            left = left.MapToIPv4();
+        }
+        if (right.IsIPv4MappedToIPv6)
+        {
+            right = right.MapToIPv4();
+        }
+
+        return left.Equals(right);
+    }
+
+    private static byte[] BuildUdpSaturationResponse(byte[] requestData)
+    {
+        ushort messageId = 0;
+        if (requestData.Length >= 2)
+        {
+            messageId = (ushort)((requestData[0] << 8) | requestData[1]);
+        }
+
+        return DnsMessageParser.BuildResponse(new DnsMessage { Id = messageId }, DnsResponseCode.ServFail);
     }
 }
 
