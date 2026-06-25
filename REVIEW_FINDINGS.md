@@ -38,6 +38,8 @@ Fix first:
 - [x] **SEV-15:** Fixed in this branch. Verification mismatches report to self-restart and restart window limits are enforced.
 - [x] **SEV-16:** Fixed in this branch. Startup/export use shared configuration validation.
 - [x] **SEV-17:** Fixed in this branch. History save no longer prunes the live model and replaces files atomically.
+- [x] **SEV-18:** Fixed in this branch. Path containment now checks segment boundaries and symlink inspection fails closed under hardening.
+- [x] **SEV-19:** Fixed in this branch. Added `FilterDns.Tests` with regression coverage for the audited critical, high, medium, and low paths.
 
 ## Findings
 
@@ -248,6 +250,7 @@ Fix first:
 ### [SEV-18] Path containment and symlink checks fail open in storage hardening
 
 - **Severity:** Low
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns/Cache/ZoneHistoryStorage.cs:190-215`, `FilterDns/Cache/ZoneHistoryStorage.cs:221-240`
 - **What's wrong:** `ValidatePathWithinDirectory` uses a plain string prefix check, so `/var/filterdns/data-backup/file` starts with `/var/filterdns/data`. `IsSymlink` returns false if attribute inspection fails.
@@ -259,6 +262,7 @@ Fix first:
 ### [SEV-19] Critical paths have no automated tests
 
 - **Severity:** Low
+- **Status:** Fixed in this branch
 - **Confidence:** Confirmed
 - **Location:** `FilterDns.sln:5`, `FilterDns/FilterDns.csproj:1-20`
 - **What's wrong:** The solution contains only the executable project and no test project. The codebase has complex DNS parser, CIDR, history persistence, IXFR diffing, and transfer orchestration logic with no regression coverage.

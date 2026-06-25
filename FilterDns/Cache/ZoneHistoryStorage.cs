@@ -198,12 +198,14 @@ public class ZoneHistoryStorage
             return; // Skip validation if hardening disabled
         }
 
-        // Resolve to absolute paths
         var absoluteFilePath = Path.GetFullPath(filePath);
         var absoluteBaseDir = Path.GetFullPath(baseDirectory);
+        var baseWithSeparator = absoluteBaseDir.EndsWith(Path.DirectorySeparatorChar)
+            ? absoluteBaseDir
+            : absoluteBaseDir + Path.DirectorySeparatorChar;
 
-        // Ensure the file path is within the base directory
-        if (!absoluteFilePath.StartsWith(absoluteBaseDir, StringComparison.Ordinal))
+        if (!absoluteFilePath.Equals(absoluteBaseDir, StringComparison.Ordinal)
+            && !absoluteFilePath.StartsWith(baseWithSeparator, StringComparison.Ordinal))
         {
             throw new System.Security.SecurityException($"Path '{filePath}' escapes data directory '{baseDirectory}'");
         }
@@ -238,7 +240,11 @@ public class ZoneHistoryStorage
         }
         catch
         {
-            // If we can't check, assume it's not a symlink (fail open for compatibility)
+            if (_securityConfig?.SecurityHardeningEnabled ?? true)
+            {
+                throw new System.Security.SecurityException($"Unable to inspect path '{path}' for symlinks");
+            }
+
             return false;
         }
 
